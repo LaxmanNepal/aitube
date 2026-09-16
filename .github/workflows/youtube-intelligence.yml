@@ -2,6 +2,9 @@ name: Update YouTube Intelligence
 
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - '.github/workflows/youtube-intelligence.yml'
   schedule:
     - cron: '17 * * * *'
 
@@ -15,12 +18,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Validate YouTube API configuration
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: |
+          if [ -z "$YOUTUBE_API_KEY" ]; then
+            echo "ERROR: YOUTUBE_API_KEY GitHub Actions secret is missing."
+            echo "Add it at Settings -> Secrets and variables -> Actions -> New repository secret."
+            exit 1
+          fi
+          echo "YouTube API secret is available to this workflow."
+
       - name: Fetch channel and video intelligence
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: |
           python - <<'PY'
-          import json, os, re, statistics, urllib.parse, urllib.request
+          import json, os, re, statistics, urllib.parse, urllib.request, urllib.error
           from datetime import datetime, timezone
 
           CHANNELS = {
@@ -33,8 +47,14 @@ jobs:
 
           def api(resource, params):
               q = urllib.parse.urlencode({**params, "key": KEY})
-              with urllib.request.urlopen(f"https://www.googleapis.com/youtube/v3/{resource}?{q}", timeout=30) as r:
-                  return json.load(r)
+              url = f"https://www.googleapis.com/youtube/v3/{resource}?{q}"
+              try:
+                  with urllib.request.urlopen(url, timeout=30) as r:
+                      return json.load(r)
+              except urllib.error.HTTPError as e:
+                  body = e.read().decode("utf-8", "replace")
+                  print(f"YouTube API error {e.code} for {resource}: {body[:1200]}")
+                  raise
 
           def iso_dt(value):
               return datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -45,8 +65,10 @@ jobs:
               recency = max(0.0, 1.0 - age_hours / 168.0)
               return round(min(100, 50 * min(ratio / 5, 1) + 35 * recency + 15 * min(v / max(baseline * 24, 1), 1)), 1)
 
-          channels_out = {"updatedAt": datetime.now(timezone.utc).isoformat(), "status": "live", "markets": {"us": [], "nepali": []}}
-          videos_out = {"updatedAt": channels_out["updatedAt"], "status": "live", "markets": {"us": [], "nepali": []}, "summary": {"us": {}, "nepali": {}}}
+          now = datetime.now(timezone.utc)
+          stamp = now.isoformat()
+          channels_out = {"updatedAt": stamp, "status": "live", "markets": {"us": [], "nepali": []}}
+          videos_out = {"updatedAt": stamp, "status": "live", "markets": {"us": [], "nepali": []}, "summary": {"us": {}, "nepali": {}}}
 
           for market, handles in CHANNELS.items():
               market_videos = []
@@ -76,7 +98,7 @@ jobs:
                       sn=v.get("snippet",{}); st=v.get("statistics",{}); cd=v.get("contentDetails",{})
                       published=sn.get("publishedAt")
                       if not published: continue
-                      age=max((datetime.now(timezone.utc)-iso_dt(published)).total_seconds()/3600, 1/60)
+                      age=max((now-iso_dt(published)).total_seconds()/3600, 1/60)
                       views=int(st.get("viewCount",0)); likes=int(st.get("likeCount",0)); comments=int(st.get("commentCount",0))
                       rows.append({"id":v.get("id"),"channelId":ch.get("id"),"channel":ch.get("snippet",{}).get("title"),"handle":handle,"title":sn.get("title"),"description":sn.get("description",""),"thumbnail":sn.get("thumbnails",{}).get("high",{}).get("url"),"publishedAt":published,"duration":cd.get("duration"),"views":views,"likes":likes,"comments":comments,"ageHours":round(age,2)})
                   baseline=statistics.median([(r["views"]/max(r["ageHours"],1/60)) for r in rows[1:]]) if len(rows)>1 else 1
@@ -100,6 +122,7 @@ jobs:
 
           with open("data/channels.json","w",encoding="utf-8") as f: json.dump(channels_out,f,ensure_ascii=False,indent=2)
           with open("data/videos.json","w",encoding="utf-8") as f: json.dump(videos_out,f,ensure_ascii=False,indent=2)
+          print(f"Updated {sum(len(v) for v in channels_out['markets'].values())} channels and {sum(len(v) for v in videos_out['markets'].values())} videos at {stamp}")
           PY
 
       - name: Commit intelligence snapshot
