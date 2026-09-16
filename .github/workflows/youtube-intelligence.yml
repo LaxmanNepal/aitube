@@ -1,0 +1,79 @@
+name: Update YouTube Intelligence
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '17 * * * *'
+
+permissions:
+  contents: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Fetch live YouTube channel data
+        env:
+          YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
+        run: |
+          python - <<'PY'
+          import json, os, urllib.parse, urllib.request
+          from datetime import datetime, timezone
+
+          channels = {
+            "us": [
+              "@danmartell","@AlexHormozi","@aliabdaal","@DanKoeTalks","@GregIsenberg",
+              "@mreflow","@MyFirstMillionPod","@starterstory","@SimonSinek","@codiesanchez",
+              "@JustinWelsh","@thefutur","@robertoblake","@ThinkMediaTV","@JeffSu",
+              "@ThomasFrank","@matt_gray_","@LiamOttley","@zainkahn","@ruben.hassid"
+            ],
+            "nepali": [
+              "@TechPana","@GadgetByteNepal","@TechLekh","@OnlineKhabar","@laxmannepalofficial"
+            ]
+          }
+
+          key = os.environ.get("YOUTUBE_API_KEY")
+          if not key:
+              raise SystemExit("Missing YOUTUBE_API_KEY secret")
+
+          def api(params):
+              q = urllib.parse.urlencode({**params, "key": key})
+              with urllib.request.urlopen("https://www.googleapis.com/youtube/v3/channels?" + q, timeout=30) as r:
+                  return json.load(r)
+
+          out = {"updatedAt": datetime.now(timezone.utc).isoformat(), "status": "live", "markets": {"us": [], "nepali": []}}
+          for market, handles in channels.items():
+              for handle in handles:
+                  data = api({"part":"snippet,statistics", "forHandle":handle})
+                  items = data.get("items", [])
+                  if not items:
+                      out["markets"][market].append({"handle": handle, "error": "channel_not_found"})
+                      continue
+                  x = items[0]
+                  s = x.get("statistics", {})
+                  out["markets"][market].append({
+                      "id": x.get("id"),
+                      "handle": handle,
+                      "title": x.get("snippet", {}).get("title"),
+                      "description": x.get("snippet", {}).get("description", ""),
+                      "thumbnail": x.get("snippet", {}).get("thumbnails", {}).get("high", {}).get("url"),
+                      "publishedAt": x.get("snippet", {}).get("publishedAt"),
+                      "subscribers": int(s.get("subscriberCount", 0)),
+                      "views": int(s.get("viewCount", 0)),
+                      "videos": int(s.get("videoCount", 0))
+                  })
+
+          with open("data/channels.json", "w", encoding="utf-8") as f:
+              json.dump(out, f, ensure_ascii=False, indent=2)
+          PY
+
+      - name: Commit snapshot
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/channels.json
+          git diff --cached --quiet || git commit -m "chore: update YouTube intelligence snapshot"
+          git push
