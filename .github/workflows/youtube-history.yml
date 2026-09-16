@@ -1,0 +1,50 @@
+name: Save YouTube History
+
+on:
+  schedule:
+    - cron: '47 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  history:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Append compact hourly snapshot
+        run: |
+          python - <<'PY'
+          import json, os
+          from datetime import datetime, timezone
+          stamp=datetime.now(timezone.utc).isoformat()
+          def read(p, fallback):
+            try:
+              with open(p,encoding='utf-8') as f:return json.load(f)
+            except Exception:return fallback
+          c=read('data/channels.json',{})
+          v=read('data/videos.json',{})
+          own=read('data/my-channels.json',{})
+          entry={'capturedAt':stamp,'status':c.get('status'),'markets':{}}
+          for m in ('us','nepali'):
+            entry['markets'][m]={'channels':[{'id':x.get('id'),'title':x.get('title'),'handle':x.get('handle'),'subscribers':x.get('subscribers'),'views':x.get('views'),'videos':x.get('videos')} for x in c.get('markets',{}).get(m,[]) if x.get('id')]}
+            top=[]
+            for x in v.get('markets',{}).get(m,[])[:20]:
+              top.append({'id':x.get('id'),'channelId':x.get('channelId'),'views':x.get('views'),'likes':x.get('likes'),'comments':x.get('comments'),'viewsPerHour':x.get('viewsPerHour'),'breakoutScore':x.get('breakoutScore')})
+            entry['markets'][m]['videos']=top
+          entry['owned']=[{'id':x.get('id'),'title':x.get('title'),'handle':x.get('handle'),'subscribers':x.get('subscribers'),'views':x.get('views'),'videos':x.get('videos')} for x in own.get('channels',[]) if x.get('id')]
+          history=read('data/history.json',{'version':1,'snapshots':[]})
+          history.setdefault('version',1);history.setdefault('snapshots',[]);history['snapshots'].append(entry)
+          history['snapshots']=history['snapshots'][-720:]
+          history['updatedAt']=stamp
+          with open('data/history.json','w',encoding='utf-8') as f:json.dump(history,f,ensure_ascii=False,separators=(',',':'))
+          print('Saved history snapshot',stamp,'total',len(history['snapshots']))
+          PY
+      - name: Commit history
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add data/history.json
+          git diff --cached --quiet || git commit -m 'chore: save YouTube analytics history'
+          git push
