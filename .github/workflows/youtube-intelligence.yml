@@ -15,65 +15,97 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Fetch live YouTube channel data
+      - name: Fetch channel and video intelligence
         env:
           YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         run: |
           python - <<'PY'
-          import json, os, urllib.parse, urllib.request
+          import json, os, re, statistics, urllib.parse, urllib.request
           from datetime import datetime, timezone
 
-          channels = {
-            "us": [
-              "@danmartell","@AlexHormozi","@aliabdaal","@DanKoeTalks","@GregIsenberg",
-              "@mreflow","@MyFirstMillionPod","@starterstory","@SimonSinek","@codiesanchez",
-              "@JustinWelsh","@thefutur","@robertoblake","@ThinkMediaTV","@JeffSu",
-              "@ThomasFrank","@matt_gray_","@LiamOttley","@zainkahn","@ruben.hassid"
-            ],
-            "nepali": [
-              "@TechPana","@GadgetByteNepal","@TechLekh","@OnlineKhabar","@laxmannepalofficial"
-            ]
+          CHANNELS = {
+            "us": ["@danmartell","@AlexHormozi","@aliabdaal","@DanKoeTalks","@GregIsenberg","@mreflow","@MyFirstMillionPod","@starterstory","@SimonSinek","@codiesanchez","@JustinWelsh","@thefutur","@robertoblake","@ThinkMediaTV","@JeffSu","@ThomasFrank","@matt_gray_","@LiamOttley","@zainkahn","@ruben.hassid"],
+            "nepali": ["@TechPana","@GadgetByteNepal","@TechLekh","@OnlineKhabar","@laxmannepalofficial"]
           }
-
-          key = os.environ.get("YOUTUBE_API_KEY")
-          if not key:
+          KEY = os.environ.get("YOUTUBE_API_KEY")
+          if not KEY:
               raise SystemExit("Missing YOUTUBE_API_KEY secret")
 
-          def api(params):
-              q = urllib.parse.urlencode({**params, "key": key})
-              with urllib.request.urlopen("https://www.googleapis.com/youtube/v3/channels?" + q, timeout=30) as r:
+          def api(resource, params):
+              q = urllib.parse.urlencode({**params, "key": KEY})
+              with urllib.request.urlopen(f"https://www.googleapis.com/youtube/v3/{resource}?{q}", timeout=30) as r:
                   return json.load(r)
 
-          out = {"updatedAt": datetime.now(timezone.utc).isoformat(), "status": "live", "markets": {"us": [], "nepali": []}}
-          for market, handles in channels.items():
+          def iso_dt(value):
+              return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+          def score(v, age_hours, baseline):
+              velocity = v / max(age_hours, 1/60)
+              ratio = velocity / max(baseline, 1)
+              recency = max(0.0, 1.0 - age_hours / 168.0)
+              return round(min(100, 50 * min(ratio / 5, 1) + 35 * recency + 15 * min(v / max(baseline * 24, 1), 1)), 1)
+
+          channels_out = {"updatedAt": datetime.now(timezone.utc).isoformat(), "status": "live", "markets": {"us": [], "nepali": []}}
+          videos_out = {"updatedAt": channels_out["updatedAt"], "status": "live", "markets": {"us": [], "nepali": []}, "summary": {"us": {}, "nepali": {}}}
+
+          for market, handles in CHANNELS.items():
+              market_videos = []
               for handle in handles:
-                  data = api({"part":"snippet,statistics", "forHandle":handle})
+                  data = api("channels", {"part":"snippet,statistics,contentDetails", "forHandle":handle})
                   items = data.get("items", [])
                   if not items:
-                      out["markets"][market].append({"handle": handle, "error": "channel_not_found"})
+                      channels_out["markets"][market].append({"handle":handle,"error":"channel_not_found"})
                       continue
-                  x = items[0]
-                  s = x.get("statistics", {})
-                  out["markets"][market].append({
-                      "id": x.get("id"),
-                      "handle": handle,
-                      "title": x.get("snippet", {}).get("title"),
-                      "description": x.get("snippet", {}).get("description", ""),
-                      "thumbnail": x.get("snippet", {}).get("thumbnails", {}).get("high", {}).get("url"),
-                      "publishedAt": x.get("snippet", {}).get("publishedAt"),
-                      "subscribers": int(s.get("subscriberCount", 0)),
-                      "views": int(s.get("viewCount", 0)),
-                      "videos": int(s.get("videoCount", 0))
+                  ch = items[0]
+                  s = ch.get("statistics", {})
+                  uploads = ch.get("contentDetails", {}).get("relatedPlaylists", {}).get("uploads")
+                  channels_out["markets"][market].append({
+                      "id": ch.get("id"), "handle": handle, "title": ch.get("snippet", {}).get("title"),
+                      "description": ch.get("snippet", {}).get("description", ""),
+                      "thumbnail": ch.get("snippet", {}).get("thumbnails", {}).get("high", {}).get("url"),
+                      "publishedAt": ch.get("snippet", {}).get("publishedAt"), "uploadsPlaylist": uploads,
+                      "subscribers": int(s.get("subscriberCount", 0)), "views": int(s.get("viewCount", 0)), "videos": int(s.get("videoCount", 0))
                   })
+                  if not uploads: continue
+                  pl = api("playlistItems", {"part":"snippet,contentDetails", "playlistId":uploads, "maxResults":10})
+                  ids = [x.get("contentDetails", {}).get("videoId") for x in pl.get("items", []) if x.get("contentDetails", {}).get("videoId")]
+                  if not ids: continue
+                  vd = api("videos", {"part":"snippet,statistics,contentDetails", "id":",".join(ids)})
+                  rows=[]
+                  for v in vd.get("items", []):
+                      sn=v.get("snippet",{}); st=v.get("statistics",{}); cd=v.get("contentDetails",{})
+                      published=sn.get("publishedAt")
+                      if not published: continue
+                      age=max((datetime.now(timezone.utc)-iso_dt(published)).total_seconds()/3600, 1/60)
+                      views=int(st.get("viewCount",0)); likes=int(st.get("likeCount",0)); comments=int(st.get("commentCount",0))
+                      rows.append({"id":v.get("id"),"channelId":ch.get("id"),"channel":ch.get("snippet",{}).get("title"),"handle":handle,"title":sn.get("title"),"description":sn.get("description",""),"thumbnail":sn.get("thumbnails",{}).get("high",{}).get("url"),"publishedAt":published,"duration":cd.get("duration"),"views":views,"likes":likes,"comments":comments,"ageHours":round(age,2)})
+                  baseline=statistics.median([(r["views"]/max(r["ageHours"],1/60)) for r in rows[1:]]) if len(rows)>1 else 1
+                  for r in rows:
+                      r["viewsPerHour"]=round(r["views"]/max(r["ageHours"],1/60),1)
+                      r["engagementRate"]=round((r["likes"]+r["comments"])/max(r["views"],1)*100,3)
+                      r["breakoutScore"]=score(r["views"],r["ageHours"],baseline)
+                  market_videos.extend(rows)
 
-          with open("data/channels.json", "w", encoding="utf-8") as f:
-              json.dump(out, f, ensure_ascii=False, indent=2)
+              market_videos.sort(key=lambda x:(x.get("breakoutScore",0),x.get("viewsPerHour",0)), reverse=True)
+              for i,v in enumerate(market_videos): v["rank"]=i+1
+              videos_out["markets"][market]=market_videos
+              topic_counts={}
+              stop={"the","and","for","with","this","that","you","your","from","are","how","what","why","into","about","new","best","i","to","a","of","in","on","is","my","it","ai"}
+              for v in market_videos:
+                  words=re.findall(r"[A-Za-z][A-Za-z0-9+#-]{2,}",v.get("title","").lower())
+                  for w in words:
+                      if w not in stop: topic_counts[w]=topic_counts.get(w,0)+1
+              topics=sorted(topic_counts.items(), key=lambda x:(x[1],x[0]), reverse=True)[:15]
+              videos_out["summary"][market]={"videosScanned":len(market_videos),"breakouts":sum(1 for x in market_videos if x.get("breakoutScore",0)>=70),"topVideo":market_videos[0] if market_videos else None,"topTopics":[{"topic":k,"mentions":v} for k,v in topics]}
+
+          with open("data/channels.json","w",encoding="utf-8") as f: json.dump(channels_out,f,ensure_ascii=False,indent=2)
+          with open("data/videos.json","w",encoding="utf-8") as f: json.dump(videos_out,f,ensure_ascii=False,indent=2)
           PY
 
-      - name: Commit snapshot
+      - name: Commit intelligence snapshot
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/channels.json
-          git diff --cached --quiet || git commit -m "chore: update YouTube intelligence snapshot"
+          git add data/channels.json data/videos.json
+          git diff --cached --quiet || git commit -m "chore: update channel and video intelligence"
           git push
